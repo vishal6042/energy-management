@@ -661,6 +661,12 @@
   color: var(--accent);
 }
 
+.scalar-viz {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .agent-badge {
   align-self: flex-start;
   display: inline-block;

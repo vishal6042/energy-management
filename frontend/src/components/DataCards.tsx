@@ -1,3 +1,15 @@
+import type { ReactNode } from 'react'
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import type { DataCard } from '../types'
 
 // Renders structured tool data as rich cards. Each `kind` maps to a typed
@@ -7,6 +19,17 @@ type Dict = Record<string, unknown>
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v ?? 0))
 const str = (v: unknown): string => (v == null ? '' : String(v))
+
+// Chart theme (Recharts can't read CSS vars from SVG, so use hex literals).
+const ACCENT = '#2dd4bf'
+const AXIS = '#8b98a8'
+const GRID = '#2c3744'
+const TOOLTIP = {
+  background: '#1a212b',
+  border: '1px solid #2c3744',
+  borderRadius: 8,
+  color: '#e6edf3',
+}
 
 function Tile({ label, value }: { label: string; value: string }) {
   return (
@@ -166,12 +189,129 @@ function CompareCard({ p }: { p: Dict }) {
   )
 }
 
+// --- Adaptive SQL result card: pick a viz from the data shape ---
+
+type ColKind = 'date' | 'number' | 'text'
+const DATE_RE = /^\d{4}-\d{2}(-\d{2})?$/
+
+function isNumeric(v: unknown): boolean {
+  if (v == null || v === '') return false
+  if (typeof v === 'number') return Number.isFinite(v)
+  return typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))
+}
+
+function classify(col: string, rows: Dict[]): ColKind {
+  const vals = rows.map((r) => r[col]).filter((v) => v != null && v !== '')
+  if (vals.length === 0) return 'text'
+  if (vals.every((v) => DATE_RE.test(String(v)))) return 'date'
+  if (vals.every(isNumeric)) return 'number'
+  return 'text'
+}
+
+function distinct(rows: Dict[], col: string): number {
+  return new Set(rows.map((r) => str(r[col]))).size
+}
+
+function ScalarViz({ label, value }: { label: string; value: unknown }) {
+  return (
+    <div className="scalar-viz">
+      <span className="chat-card-count">{isNumeric(value) ? num(value) : str(value)}</span>
+      <span className="muted small">{label}</span>
+    </div>
+  )
+}
+
+function BarViz({ rows, xCol, yCol }: { rows: Dict[]; xCol: string; yCol: string }) {
+  const data = rows.slice(0, 12).map((r) => ({ x: str(r[xCol]), y: num(r[yCol]) }))
+  return (
+    <ResponsiveContainer width="100%" height={200}>
+      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
+        <CartesianGrid stroke={GRID} vertical={false} />
+        <XAxis dataKey="x" tick={{ fill: AXIS, fontSize: 11 }} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} />
+        <Tooltip contentStyle={TOOLTIP} cursor={{ fill: 'rgba(45,212,191,0.08)' }} />
+        <Bar dataKey="y" name={yCol} fill={ACCENT} radius={[4, 4, 0, 0]} />
+      </BarChart>
+    </ResponsiveContainer>
+  )
+}
+
+function LineViz({ rows, xCol, yCol }: { rows: Dict[]; xCol: string; yCol: string }) {
+  const data = [...rows]
+    .sort((a, b) => str(a[xCol]).localeCompare(str(b[xCol])))
+    .map((r) => ({ x: str(r[xCol]).slice(5), y: num(r[yCol]) }))
+  return (
+    <ResponsiveContainer width="100%" height={200}>
+      <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
+        <CartesianGrid stroke={GRID} vertical={false} />
+        <XAxis dataKey="x" tick={{ fill: AXIS, fontSize: 11 }} />
+        <YAxis tick={{ fill: AXIS, fontSize: 11 }} />
+        <Tooltip contentStyle={TOOLTIP} />
+        <Area
+          type="monotone"
+          dataKey="y"
+          name={yCol}
+          stroke={ACCENT}
+          fill={ACCENT}
+          fillOpacity={0.2}
+        />
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+}
+
+function TableViz({ columns, rows }: { columns: string[]; rows: Dict[] }) {
+  return (
+    <table className="data-table">
+      <thead>
+        <tr>
+          {columns.map((c) => (
+            <th key={c}>{c}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={i}>
+            {columns.map((c) => (
+              <td key={c}>{str(r[c])}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 function QueryResultCard({ p }: { p: Dict }) {
+  const columns = Array.isArray(p.columns) ? (p.columns as string[]) : []
   const rows = Array.isArray(p.rows) ? (p.rows as Dict[]) : []
   const sql = str(p.sql)
   if (!sql) {
     return null
   }
+
+  const kinds = Object.fromEntries(columns.map((c) => [c, classify(c, rows)]))
+  const dateCols = columns.filter((c) => kinds[c] === 'date')
+  const numCols = columns.filter((c) => kinds[c] === 'number')
+  const textCols = columns.filter((c) => kinds[c] === 'text')
+  const maxCategory = textCols.length
+    ? Math.max(...textCols.map((c) => distinct(rows, c)))
+    : 0
+
+  let body: ReactNode
+  if (rows.length === 0) {
+    body = <div className="muted small">No rows returned.</div>
+  } else if (rows.length === 1 && columns.length === 1) {
+    body = <ScalarViz label={columns[0]} value={rows[0][columns[0]]} />
+  } else if (dateCols.length >= 1 && numCols.length >= 1 && rows.length > 1 && maxCategory <= 1) {
+    body = <LineViz rows={rows} xCol={dateCols[0]} yCol={numCols[0]} />
+  } else if (textCols.length >= 1 && numCols.length >= 1 && rows.length <= 12) {
+    body = <BarViz rows={rows} xCol={textCols[0]} yCol={numCols[0]} />
+  } else {
+    body = <TableViz columns={columns} rows={rows} />
+  }
+
   return (
     <div className="chat-card">
       <div className="chat-card-title">
@@ -180,6 +320,7 @@ function QueryResultCard({ p }: { p: Dict }) {
           · {rows.length} row{rows.length === 1 ? '' : 's'}
         </span>
       </div>
+      {body}
       <code className="query-sql">{sql}</code>
     </div>
   )
