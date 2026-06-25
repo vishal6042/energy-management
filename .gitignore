@@ -1,0 +1,23 @@
+# --- Build output / dependencies (also covered by each subproject) ---
+node_modules/
+dist/
+build/
+target/
+
+# --- Java / Maven ---
+*.class
+*.jar
+!**/.mvn/wrapper/maven-wrapper.jar
+
+# --- Logs ---
+*.log
+
+# --- Local tooling / editors ---
+.claude/
+.idea/
+.vscode/
+*.iml
+
+# --- OS ---
+.DS_Store
+Thumbs.db
