@@ -26,7 +26,7 @@ graph TB
 
     BE["Backend :8080<br/>devices + savings REST"]
     OLL["Ollama :11434<br/>qwen3.5:9b · bge-large"]
-    QD[("Qdrant :6333<br/>bems_knowledge")]
+    QD[("Qdrant :6334 gRPC<br/>bems_knowledge")]
     PG[("PostgreSQL :5432<br/>dems-db")]
 
     UI -->|"/api/assistant/*"| R
@@ -50,10 +50,10 @@ graph TB
 |---------------|----------------------------------------|-------|------|
 | Frontend      | React 19 + TypeScript + Vite           | 5173  | UI + conversational assistant |
 | Backend       | Spring Boot 4.1 (Java 21) + JPA        | 8080  | Devices/savings system of record |
-| Orchestrator  | Spring Boot 4.1 (Java 21)              | 8090  | AI Copilot: router + agents |
+| Orchestrator  | Spring Boot 4.1 + **Spring AI 2.0** (Java 21) | 8090  | AI Copilot: router + agents |
 | LLM runtime   | Ollama — `qwen3.5:9b` (Q4_K_M)         | 11434 | Chat, routing, SQL‑gen, synthesis |
 | Embeddings    | Ollama — `bge-large` (1024‑dim)        | 11434 | RAG embeddings |
-| Vector DB     | Qdrant                                 | 6333  | Knowledge retrieval |
+| Vector DB     | Qdrant                                 | 6333 (REST) · 6334 (gRPC) | Knowledge retrieval |
 | Database      | PostgreSQL 18 — `dems-db`              | 5432  | Persistent storage |
 
 ---
@@ -119,6 +119,9 @@ units). Full descriptions live in the knowledge base (`orchestrator/knowledge/`)
 ### 5.1 Responsibilities & principles
 The orchestrator is a standalone Spring Boot microservice implementing the design doc's
 **Router‑Agent pattern**. Principles:
+- **Built on Spring AI 2.0**: all LLM calls go through Spring AI's `ChatClient` (Ollama); RAG uses
+  Spring AI's `VectorStore` (Qdrant) + `EmbeddingModel`. Backend calls use a Spring **HTTP Interface**
+  (`@HttpExchange`) client. No hand-rolled HTTP clients.
 - **Local‑only**: talks to Ollama, Qdrant, the backend, and a read‑only Postgres connection — never the internet.
 - **The LLM never touches the DB for writes** and never executes free‑form code. Reads are
   validated SELECT‑only SQL; writes happen exclusively via the backend's REST actions behind HITL.
@@ -129,31 +132,34 @@ The orchestrator is a standalone Spring Boot microservice implementing the desig
 ```
 assistant/
   AssistantService     orchestrator brain: route → agent → ChatResponse
-  Router               LLM intent classifier (DATA | DOC | ACTION | CHAT)
+  Router               LLM intent classifier (ChatClient) → DATA | DOC | ACTION | CHAT
+  SpringAiMessages     maps API history → Spring AI Message list
   PermissionService    RBAC seam (stub; allow-all today)
   dto/                 ChatRequest, ChatMessage, ChatResponse, PendingAction, ConfirmRequest
 sql/                   (SQL AGENT)
   SchemaProvider       loads resources/schema.sql (DB schema for the prompt)
   SqlValidator         SELECT-only whitelist + row cap
-  SqlAgent             NL → SQL → validate → execute (read-only) → synthesize
+  SqlAgent             ChatClient: NL → SQL → validate → execute (read-only) → synthesize
 rag/                   (RAG AGENT)
-  KnowledgeIngestionService  section-chunk + embed docs → Qdrant (startup + /reindex)
-  RetrievalService     embed query → Qdrant search → chunks
+  KnowledgeIngestionService  section-chunk → Document → VectorStore.add (startup + /reindex)
+  RetrievalService     VectorStore.similaritySearch → chunks
   Chunk
 agent/                 (ACTION AGENT)
-  ToolRegistry         the 2 action tools (set_device_status, apply_algorithm)
-  ToolDispatcher       describeImpact() + executeAction() → BackendClient
+  ToolDispatcher       describeImpact() + executeAction() → BackendApi
   DeviceResolver       "Open Office AC" → ac-004
-  ToolSpec, Card
+  Card
 client/
-  OllamaClient         embed() + chat(messages, tools)
-  QdrantClient         ensureCollection/deleteCollection/upsert/search/count
-  BackendClient        typed REST calls to the backend
-config/                OrchestratorProperties, WebConfig (CORS)
+  BackendApi           @HttpExchange declarative client to the backend (data + actions)
+  dto/                 backend DTOs
+config/
+  AppConfig            ChatClient bean + BackendApi (HttpServiceProxyFactory) bean
+  OrchestratorProperties, WebConfig (CORS)
 web/                   AssistantController (/chat, /confirm, /reindex)
 resources/schema.sql   DB schema description fed to the SQL agent
 knowledge/*.md         RAG source documents
 ```
+Spring AI auto-configures the `ChatModel`/`EmbeddingModel` (Ollama) and `VectorStore` (Qdrant) beans
+from the starters; the orchestrator wires a `ChatClient` over the `ChatModel`.
 
 ### 5.3 The Router‑Agent pattern (the brain)
 `AssistantService.chat(history)` is the single entry point. It does **not** answer directly —
@@ -263,10 +269,10 @@ User question
    │  Router → DOC
    ▼
 RetrievalService.retrieve(question, topK=6)
-   - OllamaClient.embed(question)  → 1024-dim vector (bge-large)
-   - QdrantClient.search(bems_knowledge, vector, 6) → top chunks (text + title)
+   - VectorStore.similaritySearch(query=question, topK=6)   # Spring AI embeds via bge-large
+   - → top Documents (text + title/source metadata)
    ▼
-LLM (synthesis): "answer using ONLY the documentation below" + chunks
+ChatClient (synthesis): "answer using ONLY the documentation below" + chunks
    ▼
 ChatResponse.message(answer, citations=[chunk titles], agent="Knowledge (RAG)")
 ```
@@ -276,32 +282,31 @@ sequenceDiagram
     actor U as User
     participant O as AssistantService
     participant R as RetrievalService
-    participant L as Ollama
-    participant Q as Qdrant
+    participant VS as Spring AI VectorStore (Qdrant + bge-large)
+    participant C as ChatClient (Ollama)
     U->>O: chat(history) — Router: DOC
     O->>R: retrieve(question, topK=6)
-    R->>L: embed(question)
-    L-->>R: vector (1024-dim)
-    R->>Q: search(vector, 6)
-    Q-->>R: top chunks
+    R->>VS: similaritySearch(query, 6)
+    VS-->>R: top Documents (embeds + searches internally)
     R-->>O: chunks (text + titles)
-    O->>L: synthesize using docs only
-    L-->>O: NL answer
+    O->>C: synthesize using docs only
+    C-->>O: NL answer
     O-->>U: ChatResponse (agent: Knowledge (RAG)) + citations
 ```
 
-**Knowledge ingestion** (`KnowledgeIngestionService`), run on startup (if empty) and via
-`POST /api/assistant/reindex` (force):
+**Knowledge ingestion** (`KnowledgeIngestionService`), run on startup and via
+`POST /api/assistant/reindex`:
 ```
 for each .md/.txt in knowledge/ (README excluded):
-    sections = split on level-2 "## " headings   # each algorithm stays one coherent chunk
+    sections = split on level-2 "## " headings        # each algorithm stays one coherent chunk
     for each section:
-        text = "<docTitle>\n\n<section>"          # title prepended for topic context
-        embed(text) → upsert into Qdrant {title, source, text}
-force reindex first DELETES the collection so re-chunking fully replaces the index
+        text = "<docTitle>\n\n<section>"               # title prepended for topic context
+        id   = deterministic UUID from <source>#<i>    # idempotent: re-ingest upserts in place
+        VectorStore.add(Document{id, text, metadata{title, source}})   # Spring AI embeds via bge-large
 ```
 *Section‑level chunking + topK=6 is deliberate*: paragraph chunking previously caused broad
 questions ("what algorithms exist?") to miss a section that ranked just below the cutoff.
+Deterministic ids make re-indexing an upsert, so no explicit delete is needed.
 
 ### 5.7 Flow C — Action Agent + Human‑in‑the‑Loop (ACTION)
 For state changes ("turn on Open Office AC", "apply comfort", and combinations).
@@ -311,9 +316,9 @@ User request
    │  Router → ACTION
    ▼
 AssistantService.actionFlow(history)
-   - LLM (tool-calling) offered ONLY action tools: set_device_status, apply_algorithm
-   - model emits one or more tool_calls (multiple actions in ONE turn are encouraged)
-   - for each call: DeviceResolver maps name→id; ToolDispatcher.describeImpact() drafts an
+   - ChatClient asked to emit a JSON array of actions (set_device_status / apply_algorithm).
+     Structured-JSON (not tool execution) guarantees nothing runs automatically.
+   - parse JSON → for each: DeviceResolver maps name→id; ToolDispatcher.describeImpact() drafts an
      impact summary.  NOTHING is executed.
    ▼
 ChatResponse.confirm(summary, pendingActions=[…], agent="Action")   ── shown as a confirm card
@@ -323,7 +328,7 @@ ChatResponse.confirm(summary, pendingActions=[…], agent="Action")   ── sho
 AssistantService.confirm(req)
    for each action (in order):
        PermissionService.canExecute(...)        # RBAC seam (stub)
-       ToolDispatcher.executeAction(...) → BackendClient PUT /devices/{id}/(status|algorithm)
+       ToolDispatcher.executeAction(...) → BackendApi PUT /devices/{id}/(status|algorithm)
    ▼
 ChatResponse.message(combined result, agent="Action")
 ```
@@ -333,13 +338,13 @@ sequenceDiagram
     actor U as User
     participant FE as Frontend
     participant O as AssistantService
-    participant L as Ollama
+    participant C as ChatClient (Ollama)
     participant D as ToolDispatcher
-    participant BE as Backend
+    participant BE as Backend (via BackendApi @HttpExchange)
     U->>FE: "turn on X and apply comfort"
     FE->>O: /chat — Router: ACTION
-    O->>L: tool-calling (action tools only)
-    L-->>O: tool_calls [set_device_status, apply_algorithm]
+    O->>C: propose actions as JSON
+    C-->>O: [set_device_status, apply_algorithm]
     O->>D: describeImpact(each)
     D-->>O: impact summaries
     O-->>FE: confirm card (pendingActions) — nothing executed
@@ -376,7 +381,7 @@ Greetings / out‑of‑scope → a short plain LLM reply, agent **"Assistant"**.
 |---|---|
 | **HITL for all writes** | Action agent only *drafts*; execution requires `POST /confirm` |
 | **SQL whitelist** | `SqlValidator` (SELECT‑only, no chaining, no DDL/DML) **+** read‑only Hikari pool (writes fail in‑pool) **+** row cap + query timeout |
-| **Semantic layer** | Fixed tool registry (actions) and `schema.sql` (SQL) — the LLM can only operate within these |
+| **Semantic layer** | Fixed action set (structured-JSON actions) and `schema.sql` (SQL) — the LLM can only operate within these |
 | **No DB writes from LLM** | Writes go solely through backend REST endpoints |
 | **RBAC** | `PermissionService.canExecute()` seam (currently allow‑all; plug real roles here) |
 | **Air‑gapped** | All dependencies local; no outbound calls |
@@ -384,12 +389,16 @@ Greetings / out‑of‑scope → a short plain LLM reply, agent **"Assistant"**.
 ### 5.11 Configuration (`orchestrator/application.properties`)
 ```
 server.port=8090
-orchestrator.ollama.base-url=http://localhost:11434
-orchestrator.ollama.chat-model=qwen3.5:9b
-orchestrator.ollama.embedding-model=bge-large
-orchestrator.qdrant.base-url=http://localhost:6333
-orchestrator.qdrant.collection=bems_knowledge
-orchestrator.embedding-dim=1024
+# Spring AI — Ollama (chat + embeddings)
+spring.ai.ollama.base-url=http://localhost:11434
+spring.ai.ollama.chat.options.model=qwen3.5:9b
+spring.ai.ollama.embedding.options.model=bge-large
+# Spring AI — Qdrant vector store (gRPC)
+spring.ai.vectorstore.qdrant.host=localhost
+spring.ai.vectorstore.qdrant.port=6334
+spring.ai.vectorstore.qdrant.collection-name=bems_knowledge
+spring.ai.vectorstore.qdrant.initialize-schema=true
+# Backend (declarative HTTP-interface client) + RAG + read-only SQL
 orchestrator.backend.base-url=http://localhost:8080
 orchestrator.knowledge-dir=./knowledge
 orchestrator.top-k=6
@@ -414,12 +423,13 @@ orchestrator.sql.timeout-seconds=5
 - **Java 21** (Liberica/any JDK), **Node 24+**, **PostgreSQL 18**, **Ollama**, **Qdrant**.
 - Pull models once (needs internet once, then air‑gapped):
   `ollama pull qwen3.5:9b` and `ollama pull bge-large`.
-- Start **Qdrant** (native binary or `docker run -p 6333:6333 qdrant/qdrant`).
+- Start **Qdrant** (native binary or `docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant`).
+  Spring AI's Qdrant store uses the **gRPC** port `6334`.
 - Create the DB: `CREATE DATABASE "dems-db";` (user `postgres`, password `qwerty` — adjust in
   `backend/application.properties` and `orchestrator/application.properties`).
 
 ### 6.2 Ports
-FE `5173` · backend `8080` · orchestrator `8090` · Ollama `11434` · Qdrant `6333` · Postgres `5432`.
+FE `5173` · backend `8080` · orchestrator `8090` · Ollama `11434` · Qdrant `6333`/`6334` · Postgres `5432`.
 
 ### 6.3 Run order
 1. **Postgres**, **Ollama**, **Qdrant** running.
@@ -436,6 +446,8 @@ FE `5173` · backend `8080` · orchestrator `8090` · Ollama `11434` · Qdrant `
 ### 6.5 Build notes
 - Both Spring services target **Spring Boot 4.1 / Jackson 3** — JSON databind classes are in the
   `tools.jackson.databind.*` package (not `com.fasterxml.jackson.databind`).
+- The orchestrator uses **Spring AI 2.0** (the line compatible with Boot 4) via `spring-ai-bom:2.0.0`
+  + the Ollama and Qdrant starters.
 - Backend & orchestrator each ship a Maven wrapper (`mvnw`); set `JAVA_HOME` to a JDK 21.
 
 ---
