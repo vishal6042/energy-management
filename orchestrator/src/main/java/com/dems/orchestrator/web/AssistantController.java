@@ -37,7 +37,7 @@ public class AssistantController {
     /** Re-ingest the knowledge folder into Qdrant (call after adding/updating docs). */
     @PostMapping("/reindex")
     public Map<String, Object> reindex() {
-        int chunks = ingestion.ingest(true);
+        int chunks = ingestion.ingest();
         return Map.of("ingestedChunks", chunks);
     }
 }

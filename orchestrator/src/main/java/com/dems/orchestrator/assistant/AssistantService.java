@@ -1,29 +1,28 @@
 package com.dems.orchestrator.assistant;
 
+import com.dems.orchestrator.agent.Card;
 import com.dems.orchestrator.agent.ToolDispatcher;
-import com.dems.orchestrator.agent.ToolRegistry;
 import com.dems.orchestrator.assistant.dto.ChatMessage;
 import com.dems.orchestrator.assistant.dto.ChatResponse;
 import com.dems.orchestrator.assistant.dto.ConfirmRequest;
 import com.dems.orchestrator.assistant.dto.PendingAction;
-import com.dems.orchestrator.client.OllamaClient;
-import com.dems.orchestrator.client.OllamaClient.ChatResult;
-import com.dems.orchestrator.client.OllamaClient.ToolCall;
 import com.dems.orchestrator.config.OrchestratorProperties;
 import com.dems.orchestrator.rag.Chunk;
 import com.dems.orchestrator.rag.RetrievalService;
 import com.dems.orchestrator.sql.SqlAgent;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
 
 /**
- * The Orchestrator. Routes each request via an explicit LLM router to one of:
+ * The Orchestrator. An explicit LLM router sends each request to one agent:
  * SQL Agent (data), Knowledge/RAG (docs), Action (device control + HITL), or a plain reply.
+ * All LLM calls go through Spring AI's {@link ChatClient}.
  */
 @Service
 public class AssistantService {
@@ -35,38 +34,41 @@ public class AssistantService {
     private static final String AGENT_ACTION = "Action";
     private static final String AGENT_CHAT = "Assistant";
 
-    private static final String ACTION_PROMPT = """
-            You change device state for a Building Energy Management System. Call set_device_status
-            or apply_algorithm with the correct arguments. If the request needs several actions
-            (e.g. turn a device on AND apply an algorithm), request ALL the action tools in the SAME
-            turn so they can be confirmed together. Devices may be referenced by name or id.
+    private static final String ACTION_SYSTEM = """
+            You control devices in a Building Energy Management System. From the user's request decide
+            which state-changing actions to perform. Respond with ONLY a JSON array (no markdown).
+            Each element is one of:
+              {"tool":"set_device_status","device":"<id or name>","status":"online|offline"}
+              {"tool":"apply_algorithm","device":"<id or name>","algorithm":"comfort|target|none"}
+            If the request needs several actions (e.g. turn a device on AND apply an algorithm), include
+            all of them. If no device action is requested, respond with [].
             """;
 
-    private static final String CHAT_PROMPT = """
-            You are the BEMS Copilot, an on-premise, fully air-gapped assistant for a Building Energy
-            Management System. Keep replies short and operator-friendly. For device data ask the user
-            to phrase it as a question; for how-things-work, point them to ask about the algorithms.
+    private static final String CHAT_SYSTEM = """
+            You are the BEMS Copilot, an on-premise, air-gapped assistant for a Building Energy
+            Management System. Keep replies short and operator-friendly.
             """;
 
     private final Router router;
     private final SqlAgent sqlAgent;
     private final RetrievalService retrieval;
-    private final OllamaClient ollama;
-    private final ToolRegistry registry;
+    private final ChatClient chatClient;
     private final ToolDispatcher dispatcher;
     private final PermissionService permissions;
+    private final ObjectMapper mapper;
     private final int topK;
 
     public AssistantService(Router router, SqlAgent sqlAgent, RetrievalService retrieval,
-                            OllamaClient ollama, ToolRegistry registry, ToolDispatcher dispatcher,
-                            PermissionService permissions, OrchestratorProperties props) {
+                            ChatClient chatClient, ToolDispatcher dispatcher,
+                            PermissionService permissions, ObjectMapper mapper,
+                            OrchestratorProperties props) {
         this.router = router;
         this.sqlAgent = sqlAgent;
         this.retrieval = retrieval;
-        this.ollama = ollama;
-        this.registry = registry;
+        this.chatClient = chatClient;
         this.dispatcher = dispatcher;
         this.permissions = permissions;
+        this.mapper = mapper;
         this.topK = props.topK();
     }
 
@@ -82,8 +84,7 @@ public class AssistantService {
 
     private ChatResponse sqlFlow(List<ChatMessage> history) {
         SqlAgent.SqlResult r = sqlAgent.run(history);
-        List<com.dems.orchestrator.agent.Card> cards =
-                r.card() == null ? List.of() : List.of(r.card());
+        List<Card> cards = r.card() == null ? List.of() : List.of(r.card());
         return ChatResponse.message(r.answer(), List.of(), cards, AGENT_SQL);
     }
 
@@ -102,34 +103,26 @@ public class AssistantService {
                 citations.add(c.title());
             }
         }
-        List<Map<String, Object>> messages = List.of(
-                Map.of("role", "system", "content",
-                        "Answer the question using ONLY the documentation below. If it isn't covered, "
-                                + "say so. Use Markdown.\n\nDocumentation:\n" + context),
-                Map.of("role", "user", "content", question));
-        String answer = ollama.chat(messages, List.of()).content();
+        String answer = chatClient.prompt()
+                .system("Answer the question using ONLY the documentation below. If it isn't covered, "
+                        + "say so. Use Markdown.\n\nDocumentation:\n" + context)
+                .user(question)
+                .call()
+                .content();
         return ChatResponse.message(answer, citations, List.of(), AGENT_RAG);
     }
 
     private ChatResponse actionFlow(List<ChatMessage> history) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", ACTION_PROMPT));
-        for (ChatMessage m : history) {
-            messages.add(Map.of("role", m.role(), "content", m.content() == null ? "" : m.content()));
-        }
-        ChatResult result = ollama.chat(messages, registry.ollamaTools());
-        if (!result.hasToolCalls()) {
-            return ChatResponse.message(result.content(), List.of(), List.of(), AGENT_ACTION);
-        }
-        List<PendingAction> actions = new ArrayList<>();
-        for (ToolCall call : result.toolCalls()) {
-            if (registry.isAction(call.name())) {
-                String summary = dispatcher.describeImpact(call.name(), call.arguments());
-                actions.add(new PendingAction(call.name(), call.arguments(), summary));
-            }
-        }
+        String raw = chatClient.prompt()
+                .system(ACTION_SYSTEM)
+                .messages(SpringAiMessages.from(history))
+                .call()
+                .content();
+        List<PendingAction> actions = parseActions(raw);
         if (actions.isEmpty()) {
-            return ChatResponse.message(result.content(), List.of(), List.of(), AGENT_ACTION);
+            return ChatResponse.message(
+                    "I didn't detect a device action to perform. Could you rephrase?",
+                    List.of(), List.of(), AGENT_ACTION);
         }
         String summary = actions.size() == 1
                 ? actions.get(0).summary()
@@ -138,12 +131,12 @@ public class AssistantService {
     }
 
     private ChatResponse chatFlow(List<ChatMessage> history) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", CHAT_PROMPT));
-        for (ChatMessage m : history) {
-            messages.add(Map.of("role", m.role(), "content", m.content() == null ? "" : m.content()));
-        }
-        return ChatResponse.message(ollama.chat(messages, List.of()).content(), List.of(), List.of(), AGENT_CHAT);
+        String answer = chatClient.prompt()
+                .system(CHAT_SYSTEM)
+                .messages(SpringAiMessages.from(history))
+                .call()
+                .content();
+        return ChatResponse.message(answer, List.of(), List.of(), AGENT_CHAT);
     }
 
     public ChatResponse confirm(ConfirmRequest req) {
@@ -164,6 +157,47 @@ public class AssistantService {
             }
         }
         return ChatResponse.message(String.join("\n", results), List.of(), List.of(), AGENT_ACTION);
+    }
+
+    /** Parse the model's JSON action array into drafted, not-yet-executed PendingActions. */
+    @SuppressWarnings("unchecked")
+    private List<PendingAction> parseActions(String raw) {
+        List<PendingAction> actions = new ArrayList<>();
+        if (raw == null) {
+            return actions;
+        }
+        String json = raw.strip();
+        int start = json.indexOf('[');
+        int end = json.lastIndexOf(']');
+        if (start < 0 || end <= start) {
+            return actions;
+        }
+        json = json.substring(start, end + 1);
+        try {
+            List<Map<String, Object>> items = mapper.readValue(json, List.class);
+            for (Map<String, Object> item : items) {
+                String tool = str(item.get("tool"));
+                if (!"set_device_status".equals(tool) && !"apply_algorithm".equals(tool)) {
+                    continue;
+                }
+                Map<String, Object> args = new java.util.LinkedHashMap<>();
+                args.put("device", item.get("device"));
+                if (item.containsKey("status")) {
+                    args.put("status", item.get("status"));
+                }
+                if (item.containsKey("algorithm")) {
+                    args.put("algorithm", item.get("algorithm"));
+                }
+                actions.add(new PendingAction(tool, args, dispatcher.describeImpact(tool, args)));
+            }
+        } catch (Exception e) {
+            log.warn("Could not parse action JSON [{}]: {}", json, e.getMessage());
+        }
+        return actions;
+    }
+
+    private static String str(Object o) {
+        return o == null ? "" : String.valueOf(o);
     }
 
     private String lastUser(List<ChatMessage> history) {

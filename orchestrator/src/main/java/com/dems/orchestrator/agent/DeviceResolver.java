@@ -1,6 +1,6 @@
 package com.dems.orchestrator.agent;
 
-import com.dems.orchestrator.client.BackendClient;
+import com.dems.orchestrator.client.BackendApi;
 import com.dems.orchestrator.client.dto.DeviceDto;
 import java.util.List;
 import java.util.Optional;
@@ -10,9 +10,9 @@ import org.springframework.stereotype.Component;
 @Component
 public class DeviceResolver {
 
-    private final BackendClient backend;
+    private final BackendApi backend;
 
-    public DeviceResolver(BackendClient backend) {
+    public DeviceResolver(BackendApi backend) {
         this.backend = backend;
     }
 

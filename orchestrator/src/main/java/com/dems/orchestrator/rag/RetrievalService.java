@@ -1,43 +1,42 @@
 package com.dems.orchestrator.rag;
 
-import com.dems.orchestrator.client.OllamaClient;
-import com.dems.orchestrator.client.QdrantClient;
 import com.dems.orchestrator.config.OrchestratorProperties;
-import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
 
-/** RAG agent: embeds the query and retrieves matching knowledge chunks from Qdrant. */
+/** RAG agent: retrieves matching knowledge chunks from the Spring AI vector store. */
 @Service
 public class RetrievalService {
 
     private static final Logger log = LoggerFactory.getLogger(RetrievalService.class);
 
-    private final OllamaClient ollama;
-    private final QdrantClient qdrant;
+    private final VectorStore vectorStore;
     private final OrchestratorProperties props;
 
-    public RetrievalService(OllamaClient ollama, QdrantClient qdrant, OrchestratorProperties props) {
-        this.ollama = ollama;
-        this.qdrant = qdrant;
+    public RetrievalService(VectorStore vectorStore, OrchestratorProperties props) {
+        this.vectorStore = vectorStore;
         this.props = props;
     }
 
     public List<Chunk> retrieve(String query, int topK) {
         try {
-            float[] vector = ollama.embed(query);
-            List<QdrantClient.Hit> hits = qdrant.search(props.qdrant().collection(), vector, topK);
-            List<Chunk> chunks = new ArrayList<>();
-            for (QdrantClient.Hit h : hits) {
-                chunks.add(new Chunk(
-                        String.valueOf(h.payload().getOrDefault("title", "Untitled")),
-                        String.valueOf(h.payload().getOrDefault("source", "")),
-                        String.valueOf(h.payload().getOrDefault("text", "")),
-                        h.score()));
+            List<Document> docs = vectorStore.similaritySearch(
+                    SearchRequest.builder().query(query == null ? "" : query).topK(topK).build());
+            if (docs == null) {
+                return List.of();
             }
-            return chunks;
+            return docs.stream()
+                    .map(d -> new Chunk(
+                            String.valueOf(d.getMetadata().getOrDefault("title", "Untitled")),
+                            String.valueOf(d.getMetadata().getOrDefault("source", "")),
+                            d.getText() == null ? "" : d.getText(),
+                            0.0))
+                    .toList();
         } catch (Exception e) {
             log.warn("Knowledge retrieval failed (is Qdrant up and the collection populated?): {}",
                     e.getMessage());

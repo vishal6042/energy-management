@@ -1,6 +1,6 @@
 package com.dems.orchestrator.agent;
 
-import com.dems.orchestrator.client.BackendClient;
+import com.dems.orchestrator.client.BackendApi;
 import com.dems.orchestrator.client.dto.DeviceDto;
 import java.util.Map;
 import org.springframework.stereotype.Component;
@@ -9,10 +9,10 @@ import org.springframework.stereotype.Component;
 @Component
 public class ToolDispatcher {
 
-    private final BackendClient backend;
+    private final BackendApi backend;
     private final DeviceResolver resolver;
 
-    public ToolDispatcher(BackendClient backend, DeviceResolver resolver) {
+    public ToolDispatcher(BackendApi backend, DeviceResolver resolver) {
         this.backend = backend;
         this.resolver = resolver;
     }
@@ -53,14 +53,14 @@ public class ToolDispatcher {
             case "set_device_status" -> {
                 DeviceDto d = requireDevice(arg(args, "device"));
                 String status = lower(arg(args, "status"));
-                DeviceDto updated = backend.setDeviceStatus(d.id(), status);
+                DeviceDto updated = backend.setDeviceStatus(d.id(), Map.of("status", status));
                 yield updated.name() + " is now " + updated.status()
                         + " (power " + round(updated.powerW() / 1000.0, 2) + " kW).";
             }
             case "apply_algorithm" -> {
                 DeviceDto d = requireDevice(arg(args, "device"));
                 String algo = lower(arg(args, "algorithm"));
-                DeviceDto updated = backend.applyAlgorithm(d.id(), algo);
+                DeviceDto updated = backend.applyAlgorithm(d.id(), Map.of("algorithm", algo));
                 yield "none".equals(algo)
                         ? "Cleared the algorithm on " + updated.name() + "."
                         : "Applied the '" + algo + "' algorithm to " + updated.name() + ".";

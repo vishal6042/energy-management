@@ -2,7 +2,6 @@ package com.dems.orchestrator.sql;
 
 import com.dems.orchestrator.agent.Card;
 import com.dems.orchestrator.assistant.dto.ChatMessage;
-import com.dems.orchestrator.client.OllamaClient;
 import com.dems.orchestrator.config.OrchestratorProperties;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,6 +9,8 @@ import java.util.Map;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -27,16 +28,16 @@ public class SqlAgent {
 
     public record SqlResult(String answer, Card card) {}
 
-    private final OllamaClient ollama;
+    private final ChatClient chatClient;
     private final SchemaProvider schemaProvider;
     private final SqlValidator validator;
     private final ObjectMapper mapper;
     private final JdbcTemplate jdbc;
     private final int maxRows;
 
-    public SqlAgent(OllamaClient ollama, SchemaProvider schemaProvider, SqlValidator validator,
+    public SqlAgent(ChatClient chatClient, SchemaProvider schemaProvider, SqlValidator validator,
                     ObjectMapper mapper, DataSource dataSource, OrchestratorProperties props) {
-        this.ollama = ollama;
+        this.chatClient = chatClient;
         this.schemaProvider = schemaProvider;
         this.validator = validator;
         this.mapper = mapper;
@@ -72,43 +73,55 @@ public class SqlAgent {
         return new SqlResult(answer, card);
     }
 
+    private static final String SQL_SYSTEM = """
+            You translate the user's question into exactly ONE read-only PostgreSQL SELECT
+            for the schema below. Output ONLY the SQL — no markdown, no explanation, no semicolon.
+            Use the exact table/column names. Enum values are UPPERCASE. Join saving_records to
+            devices on saving_records.device_id = devices.id when filtering by device name.
+
+            Dates: the period column is TEXT ('YYYY-MM-DD' for DAILY, 'YYYY-MM' for MONTHLY).
+            Never assume today's date — use CURRENT_DATE and cast with period::date for date math.
+            For a "last N days" request you MUST filter daily rows, e.g.:
+              WHERE sr.granularity = 'DAILY' AND sr.period::date >= CURRENT_DATE - INTERVAL '<N-1> days'
+            Example — last 7 days of usage per device:
+              SELECT d.name, sr.period, sr.usage_kwh, sr.usage_cost
+              FROM saving_records sr JOIN devices d ON d.id = sr.device_id
+              WHERE sr.granularity = 'DAILY' AND sr.period::date >= CURRENT_DATE - INTERVAL '6 days'
+              ORDER BY sr.period DESC
+            For months use sr.granularity = 'MONTHLY'.
+
+            """;
+
     private String generateSql(List<ChatMessage> history) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", """
-                You translate the user's question into exactly ONE read-only PostgreSQL SELECT
-                for the schema below. Output ONLY the SQL — no markdown, no explanation, no semicolon.
-                Use the exact table/column names. Enum values are UPPERCASE. Join saving_records to
-                devices on saving_records.device_id = devices.id when filtering by device name.
-
-                Dates: the period column is TEXT ('YYYY-MM-DD' for DAILY, 'YYYY-MM' for MONTHLY).
-                Never assume today's date — use CURRENT_DATE and cast with period::date for date math.
-                For a "last N days" request you MUST filter daily rows, e.g.:
-                  WHERE sr.granularity = 'DAILY' AND sr.period::date >= CURRENT_DATE - INTERVAL '<N-1> days'
-                Example — last 7 days of usage per device:
-                  SELECT d.name, sr.period, sr.usage_kwh, sr.usage_cost
-                  FROM saving_records sr JOIN devices d ON d.id = sr.device_id
-                  WHERE sr.granularity = 'DAILY' AND sr.period::date >= CURRENT_DATE - INTERVAL '6 days'
-                  ORDER BY sr.period DESC
-                For months use sr.granularity = 'MONTHLY'.
-
-                """ + schemaProvider.schema()));
         // Include recent turns so references like "them"/"that device" resolve.
-        for (ChatMessage m : recent(history)) {
-            messages.add(Map.of("role", m.role(), "content", m.content() == null ? "" : m.content()));
-        }
-        String sql = ollama.chat(messages, List.of()).content();
+        String sql = chatClient.prompt()
+                .system(SQL_SYSTEM + schemaProvider.schema())
+                .messages(toMessages(recent(history)))
+                .call()
+                .content();
         return stripFences(sql);
     }
 
     private String synthesize(String question, String sql, List<Map<String, Object>> rows) {
         String rowsJson = toJson(rows.size() > 50 ? rows.subList(0, 50) : rows);
-        List<Map<String, Object>> messages = List.of(
-                Map.of("role", "system", "content",
-                        "Answer the user's question concisely and clearly using ONLY the query result "
-                                + "below. Do not mention SQL or databases. Use Markdown when helpful.\n"
-                                + "Question: " + question + "\nResult JSON: " + rowsJson),
-                Map.of("role", "user", "content", question));
-        return ollama.chat(messages, List.of()).content();
+        return chatClient.prompt()
+                .system("Answer the user's question concisely and clearly using ONLY the query result "
+                        + "below. Do not mention SQL or databases. Use Markdown when helpful.\n"
+                        + "Result JSON: " + rowsJson)
+                .user(question)
+                .call()
+                .content();
+    }
+
+    private List<org.springframework.ai.chat.messages.Message> toMessages(List<ChatMessage> history) {
+        List<org.springframework.ai.chat.messages.Message> out = new ArrayList<>();
+        for (ChatMessage m : history) {
+            String c = m.content() == null ? "" : m.content();
+            out.add("assistant".equalsIgnoreCase(m.role())
+                    ? new org.springframework.ai.chat.messages.AssistantMessage(c)
+                    : new UserMessage(c));
+        }
+        return out;
     }
 
     private List<ChatMessage> recent(List<ChatMessage> history) {

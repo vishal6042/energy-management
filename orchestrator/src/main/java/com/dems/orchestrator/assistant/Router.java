@@ -1,12 +1,10 @@
 package com.dems.orchestrator.assistant;
 
 import com.dems.orchestrator.assistant.dto.ChatMessage;
-import com.dems.orchestrator.client.OllamaClient;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
 /** Classifies each request's intent so the orchestrator can route it to the right agent. */
@@ -30,19 +28,18 @@ public class Router {
             Reply with one word: DATA, DOC, ACTION, or CHAT.
             """;
 
-    private final OllamaClient ollama;
+    private final ChatClient chatClient;
 
-    public Router(OllamaClient ollama) {
-        this.ollama = ollama;
+    public Router(ChatClient chatClient) {
+        this.chatClient = chatClient;
     }
 
     public Intent classify(List<ChatMessage> history) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", SYSTEM));
-        for (ChatMessage m : history) {
-            messages.add(Map.of("role", m.role(), "content", m.content() == null ? "" : m.content()));
-        }
-        String raw = ollama.chat(messages, List.of()).content();
+        String raw = chatClient.prompt()
+                .system(SYSTEM)
+                .messages(SpringAiMessages.from(history))
+                .call()
+                .content();
         String label = raw == null ? "" : raw.trim().toUpperCase();
         Intent intent = parse(label);
         log.info("Router intent: {} (raw='{}')", intent, raw == null ? "" : raw.strip());
