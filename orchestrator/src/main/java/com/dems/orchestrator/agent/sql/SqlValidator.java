@@ -1,4 +1,4 @@
-package com.dems.orchestrator.sql;
+package com.dems.orchestrator.agent.sql;
 
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
@@ -26,7 +26,6 @@ public class SqlValidator {
             throw new InvalidSqlException("Empty SQL.");
         }
         String sql = rawSql.strip();
-        // Drop a single trailing semicolon; reject any internal ones (no statement chaining).
         if (sql.endsWith(";")) {
             sql = sql.substring(0, sql.length() - 1).strip();
         }
@@ -40,7 +39,6 @@ public class SqlValidator {
         if (FORBIDDEN.matcher(sql).find()) {
             throw new InvalidSqlException("Query contains a forbidden (write/DDL) keyword.");
         }
-        // Cap rows if the model didn't add a LIMIT.
         if (!Pattern.compile("\\bLIMIT\\b", Pattern.CASE_INSENSITIVE).matcher(sql).find()) {
             sql = sql + " LIMIT " + maxRows;
         }

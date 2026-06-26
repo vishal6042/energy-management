@@ -1,6 +1,5 @@
-package com.dems.orchestrator.rag;
+package com.dems.orchestrator.agent.rag;
 
-import com.dems.orchestrator.config.OrchestratorProperties;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,18 +8,16 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
 
-/** RAG agent: retrieves matching knowledge chunks from the Spring AI vector store. */
+/** Retrieves matching knowledge chunks from the Spring AI vector store. */
 @Service
 public class RetrievalService {
 
     private static final Logger log = LoggerFactory.getLogger(RetrievalService.class);
 
     private final VectorStore vectorStore;
-    private final OrchestratorProperties props;
 
-    public RetrievalService(VectorStore vectorStore, OrchestratorProperties props) {
+    public RetrievalService(VectorStore vectorStore) {
         this.vectorStore = vectorStore;
-        this.props = props;
     }
 
     public List<Chunk> retrieve(String query, int topK) {

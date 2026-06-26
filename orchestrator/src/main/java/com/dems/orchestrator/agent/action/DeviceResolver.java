@@ -1,4 +1,4 @@
-package com.dems.orchestrator.agent;
+package com.dems.orchestrator.agent.action;
 
 import com.dems.orchestrator.client.BackendApi;
 import com.dems.orchestrator.client.dto.DeviceDto;
@@ -22,14 +22,12 @@ public class DeviceResolver {
         }
         String needle = idOrName.trim().toLowerCase();
         List<DeviceDto> devices = backend.listDevices();
-        // Exact id first.
         Optional<DeviceDto> byId = devices.stream()
                 .filter(d -> d.id().equalsIgnoreCase(idOrName.trim()))
                 .findFirst();
         if (byId.isPresent()) {
             return byId;
         }
-        // Then exact name, then contains.
         return devices.stream().filter(d -> d.name().equalsIgnoreCase(idOrName.trim())).findFirst()
                 .or(() -> devices.stream()
                         .filter(d -> d.name().toLowerCase().contains(needle))

@@ -1,6 +1,5 @@
 package com.dems.orchestrator.assistant.dto;
 
-import com.dems.orchestrator.agent.Card;
 import java.util.List;
 
 /**

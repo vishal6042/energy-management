@@ -4,7 +4,7 @@ import com.dems.orchestrator.assistant.AssistantService;
 import com.dems.orchestrator.assistant.dto.ChatRequest;
 import com.dems.orchestrator.assistant.dto.ChatResponse;
 import com.dems.orchestrator.assistant.dto.ConfirmRequest;
-import com.dems.orchestrator.rag.KnowledgeIngestionService;
+import com.dems.orchestrator.agent.rag.KnowledgeIngestionService;
 import jakarta.validation.Valid;
 import java.util.Map;
 import org.springframework.web.bind.annotation.PostMapping;

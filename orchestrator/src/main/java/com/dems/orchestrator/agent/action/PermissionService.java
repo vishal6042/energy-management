@@ -1,12 +1,12 @@
-package com.dems.orchestrator.assistant;
+package com.dems.orchestrator.agent.action;
 
 import java.util.Map;
 import org.springframework.stereotype.Service;
 
 /**
- * RBAC seam for the HITL "Validation" step. The blueprint requires actions to be
- * checked against the logged-in user's permissions. There is no auth in the app
- * yet, so this is a permissive stub — the real check plugs in here later.
+ * RBAC seam for the HITL "Validation" step. The blueprint requires actions to be checked against
+ * the logged-in user's permissions. There is no auth in the app yet, so this is a permissive stub —
+ * the real check plugs in here later.
  */
 @Service
 public class PermissionService {

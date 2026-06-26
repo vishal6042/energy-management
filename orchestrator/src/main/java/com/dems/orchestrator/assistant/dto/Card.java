@@ -1,4 +1,4 @@
-package com.dems.orchestrator.agent;
+package com.dems.orchestrator.assistant.dto;
 
 import java.util.Map;
 

@@ -1,4 +1,4 @@
-package com.dems.orchestrator.rag;
+package com.dems.orchestrator.agent.rag;
 
 import com.dems.orchestrator.config.OrchestratorProperties;
 import java.io.IOException;
@@ -20,9 +20,9 @@ import org.springframework.stereotype.Service;
 
 /**
  * Ingests knowledge documents (.md/.txt under {@code orchestrator.knowledge-dir}) into the Spring AI
- * vector store. Section-chunked by level-2 headings; embedding is handled by Spring AI's EmbeddingModel.
- * Document ids are deterministic (UUID from source+index), so re-ingesting upserts in place (idempotent)
- * instead of creating duplicates. Runs on startup and via {@code POST /api/assistant/reindex}.
+ * vector store. Section-chunked by level-2 headings; Spring AI's EmbeddingModel does the embedding.
+ * Document ids are deterministic (UUID from source+index), so re-ingesting upserts in place
+ * (idempotent). Runs on startup and via {@code POST /api/assistant/reindex}.
  */
 @Service
 public class KnowledgeIngestionService implements ApplicationRunner {
@@ -62,11 +62,11 @@ public class KnowledgeIngestionService implements ApplicationRunner {
                 String content = Files.readString(file);
                 List<String> sections = chunk(content);
                 for (int i = 0; i < sections.size(); i++) {
-                    String id = UUID.nameUUIDFromBytes(
+                    String docId = UUID.nameUUIDFromBytes(
                             (source + "#" + i).getBytes(StandardCharsets.UTF_8)).toString();
                     String text = title + "\n\n" + sections.get(i);
                     docs.add(Document.builder()
-                            .id(id)
+                            .id(docId)
                             .text(text)
                             .metadata(Map.of("title", title, "source", source))
                             .build());

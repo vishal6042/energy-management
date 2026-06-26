@@ -1,4 +1,4 @@
-package com.dems.orchestrator.assistant;
+package com.dems.orchestrator.agent;
 
 import com.dems.orchestrator.assistant.dto.ChatMessage;
 import java.util.ArrayList;
@@ -8,11 +8,11 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 
 /** Converts the API's conversation history into Spring AI chat messages. */
-final class SpringAiMessages {
+public final class SpringAiMessages {
 
     private SpringAiMessages() {}
 
-    static List<Message> from(List<ChatMessage> history) {
+    public static List<Message> from(List<ChatMessage> history) {
         List<Message> out = new ArrayList<>();
         for (ChatMessage m : history) {
             String content = m.content() == null ? "" : m.content();

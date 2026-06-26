@@ -1,4 +1,4 @@
-package com.dems.orchestrator.agent;
+package com.dems.orchestrator.agent.action;
 
 import com.dems.orchestrator.client.BackendApi;
 import com.dems.orchestrator.client.dto.DeviceDto;

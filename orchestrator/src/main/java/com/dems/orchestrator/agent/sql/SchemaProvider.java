@@ -1,4 +1,4 @@
-package com.dems.orchestrator.sql;
+package com.dems.orchestrator.agent.sql;
 
 import java.nio.charset.StandardCharsets;
 import org.springframework.core.io.ClassPathResource;

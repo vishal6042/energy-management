@@ -1,6 +1,10 @@
-package com.dems.orchestrator.sql;
+package com.dems.orchestrator.agent.sql;
 
-import com.dems.orchestrator.agent.Card;
+import com.dems.orchestrator.agent.Agent;
+import com.dems.orchestrator.agent.AgentRequest;
+import com.dems.orchestrator.agent.AgentResult;
+import com.dems.orchestrator.agent.SpringAiMessages;
+import com.dems.orchestrator.assistant.dto.Card;
 import com.dems.orchestrator.assistant.dto.ChatMessage;
 import com.dems.orchestrator.config.OrchestratorProperties;
 import java.util.ArrayList;
@@ -10,68 +14,19 @@ import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Text-to-SQL data agent: the LLM writes a PostgreSQL SELECT from the schema, the
- * query is validated (SELECT-only) and executed against a read-only connection,
- * and the LLM then synthesizes a concise answer from the rows.
+ * Text-to-SQL data agent: the LLM writes a PostgreSQL SELECT from the schema, the query is validated
+ * (SELECT-only) and executed against a read-only connection, then the LLM synthesizes an answer.
  */
-@Service
-public class SqlAgent {
+@Component
+public class SqlAgent implements Agent {
 
     private static final Logger log = LoggerFactory.getLogger(SqlAgent.class);
-
-    public record SqlResult(String answer, Card card) {}
-
-    private final ChatClient chatClient;
-    private final SchemaProvider schemaProvider;
-    private final SqlValidator validator;
-    private final ObjectMapper mapper;
-    private final JdbcTemplate jdbc;
-    private final int maxRows;
-
-    public SqlAgent(ChatClient chatClient, SchemaProvider schemaProvider, SqlValidator validator,
-                    ObjectMapper mapper, DataSource dataSource, OrchestratorProperties props) {
-        this.chatClient = chatClient;
-        this.schemaProvider = schemaProvider;
-        this.validator = validator;
-        this.mapper = mapper;
-        this.maxRows = props.sql().maxRows();
-        this.jdbc = new JdbcTemplate(dataSource);
-        this.jdbc.setMaxRows(props.sql().maxRows());
-        this.jdbc.setQueryTimeout(props.sql().timeoutSeconds());
-    }
-
-    public SqlResult run(List<ChatMessage> history) {
-        String rawSql = generateSql(history);
-        String sql;
-        try {
-            sql = validator.validate(rawSql, maxRows);
-        } catch (SqlValidator.InvalidSqlException e) {
-            log.warn("Rejected generated SQL [{}]: {}", rawSql, e.getMessage());
-            return new SqlResult(
-                    "I couldn't run that as a safe read-only query. Could you rephrase the question?",
-                    null);
-        }
-
-        List<Map<String, Object>> rows;
-        try {
-            rows = jdbc.query(sql, new ColumnMapRowMapper());
-        } catch (Exception e) {
-            log.warn("SQL execution failed [{}]: {}", sql, e.getMessage());
-            return new SqlResult("That query couldn't be executed against the database.", null);
-        }
-
-        List<String> columns = rows.isEmpty() ? List.of() : new ArrayList<>(rows.get(0).keySet());
-        Card card = new Card("query_result", Map.of("sql", sql, "columns", columns, "rows", rows));
-        String answer = synthesize(lastUser(history), sql, rows);
-        return new SqlResult(answer, card);
-    }
 
     private static final String SQL_SYSTEM = """
             You translate the user's question into exactly ONE read-only PostgreSQL SELECT
@@ -92,17 +47,77 @@ public class SqlAgent {
 
             """;
 
+    private final ChatClient chatClient;
+    private final SchemaProvider schemaProvider;
+    private final SqlValidator validator;
+    private final ObjectMapper mapper;
+    private final JdbcTemplate jdbc;
+    private final int maxRows;
+
+    public SqlAgent(ChatClient chatClient, SchemaProvider schemaProvider, SqlValidator validator,
+                    ObjectMapper mapper, DataSource dataSource, OrchestratorProperties props) {
+        this.chatClient = chatClient;
+        this.schemaProvider = schemaProvider;
+        this.validator = validator;
+        this.mapper = mapper;
+        this.maxRows = props.sql().maxRows();
+        this.jdbc = new JdbcTemplate(dataSource);
+        this.jdbc.setMaxRows(props.sql().maxRows());
+        this.jdbc.setQueryTimeout(props.sql().timeoutSeconds());
+    }
+
+    @Override
+    public String id() {
+        return "sql";
+    }
+
+    @Override
+    public String displayName() {
+        return "SQL Agent";
+    }
+
+    @Override
+    public String routingDescription() {
+        return "questions answerable from the database: device lists/counts/status, energy usage, "
+                + "savings, costs, history, comparisons, analytics.";
+    }
+
+    @Override
+    public AgentResult handle(AgentRequest request) {
+        String rawSql = generateSql(request.history());
+        String sql;
+        try {
+            sql = validator.validate(rawSql, maxRows);
+        } catch (SqlValidator.InvalidSqlException e) {
+            log.warn("Rejected generated SQL [{}]: {}", rawSql, e.getMessage());
+            return AgentResult.message(
+                    "I couldn't run that as a safe read-only query. Could you rephrase the question?");
+        }
+
+        List<Map<String, Object>> rows;
+        try {
+            rows = jdbc.query(sql, new ColumnMapRowMapper());
+        } catch (Exception e) {
+            log.warn("SQL execution failed [{}]: {}", sql, e.getMessage());
+            return AgentResult.message("That query couldn't be executed against the database.");
+        }
+
+        List<String> columns = rows.isEmpty() ? List.of() : new ArrayList<>(rows.get(0).keySet());
+        Card card = new Card("query_result", Map.of("sql", sql, "columns", columns, "rows", rows));
+        String answer = synthesize(request.lastUser(), rows);
+        return AgentResult.message(answer, List.of(), List.of(card));
+    }
+
     private String generateSql(List<ChatMessage> history) {
-        // Include recent turns so references like "them"/"that device" resolve.
         String sql = chatClient.prompt()
                 .system(SQL_SYSTEM + schemaProvider.schema())
-                .messages(toMessages(recent(history)))
+                .messages(SpringAiMessages.from(recent(history)))
                 .call()
                 .content();
         return stripFences(sql);
     }
 
-    private String synthesize(String question, String sql, List<Map<String, Object>> rows) {
+    private String synthesize(String question, List<Map<String, Object>> rows) {
         String rowsJson = toJson(rows.size() > 50 ? rows.subList(0, 50) : rows);
         return chatClient.prompt()
                 .system("Answer the user's question concisely and clearly using ONLY the query result "
@@ -113,29 +128,9 @@ public class SqlAgent {
                 .content();
     }
 
-    private List<org.springframework.ai.chat.messages.Message> toMessages(List<ChatMessage> history) {
-        List<org.springframework.ai.chat.messages.Message> out = new ArrayList<>();
-        for (ChatMessage m : history) {
-            String c = m.content() == null ? "" : m.content();
-            out.add("assistant".equalsIgnoreCase(m.role())
-                    ? new org.springframework.ai.chat.messages.AssistantMessage(c)
-                    : new UserMessage(c));
-        }
-        return out;
-    }
-
     private List<ChatMessage> recent(List<ChatMessage> history) {
         int n = history.size();
         return n > 6 ? history.subList(n - 6, n) : history;
-    }
-
-    private String lastUser(List<ChatMessage> history) {
-        for (int i = history.size() - 1; i >= 0; i--) {
-            if ("user".equals(history.get(i).role())) {
-                return history.get(i).content();
-            }
-        }
-        return "";
     }
 
     private String stripFences(String s) {
